@@ -21,6 +21,27 @@ function requirePositiveInteger(value, label) {
   }
 }
 
+function requireIsoDate(value, label) {
+  const dateOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const dateTime =
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+  const [year, month, day] = dateOnly || dateTime ? value.slice(0, 10).split('-').map(Number) : [];
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthLengths = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (
+    (!dateOnly && !dateTime) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > monthLengths[month - 1] ||
+    Number.isNaN(new Date(value).getTime())
+  ) {
+    throw new DomainError('VALIDATION', `${label} must be a valid ISO date.`);
+  }
+  return new Date(value).toISOString();
+}
+
 function requireStore(store) {
   if (
     store === null ||
@@ -72,11 +93,22 @@ export function createStore() {
 export function createEvent(store, details) {
   requireStore(store);
   requireRecord(details, 'Event details');
-  const name = requireNonEmptyString(details.name, 'Event name');
+  const title = requireNonEmptyString(details.title, 'Event title');
+  const city = requireNonEmptyString(details.city, 'Event city');
+  const venue = details.venue === undefined ? '' : details.venue;
+  if (typeof venue !== 'string') {
+    throw new DomainError('VALIDATION', 'Event venue must be a string.');
+  }
+  const startsAt = requireIsoDate(details.startsAt, 'Event date');
 
   const event = {
     id: newId(),
-    name,
+    title,
+    name: title,
+    city,
+    venue: venue.trim(),
+    startsAt,
+    status: 'draft',
     tiers: new Map()
   };
   store.events.set(event.id, event);
@@ -104,6 +136,48 @@ export function addTier(store, eventId, details) {
   };
   event.tiers.set(tier.id, tier);
   return tier;
+}
+
+export function publishEvent(store, eventId) {
+  requireStore(store);
+  requireNonEmptyString(eventId, 'Event ID');
+  const event = getEvent(store, eventId);
+  if (event.tiers.size === 0) {
+    throw new DomainError('INVALID_STATE', 'Add at least one ticket tier before publishing.');
+  }
+  event.status = 'published';
+  return event;
+}
+
+export function unpublishEvent(store, eventId) {
+  requireStore(store);
+  requireNonEmptyString(eventId, 'Event ID');
+  const event = getEvent(store, eventId);
+  event.status = 'draft';
+  return event;
+}
+
+export function listEventSummaries(store, { publishedOnly = true } = {}) {
+  requireStore(store);
+  const summaries = [];
+  for (const event of store.events.values()) {
+    if (publishedOnly && event.status !== 'published') {
+      continue;
+    }
+    const tiers = [...event.tiers.values()];
+    summaries.push({
+      id: event.id,
+      title: event.title,
+      city: event.city,
+      venue: event.venue,
+      startsAt: event.startsAt,
+      status: event.status,
+      tierCount: tiers.length,
+      minPriceCents: tiers.length ? Math.min(...tiers.map((tier) => tier.priceCents)) : null,
+      seatsLeft: tiers.reduce((total, tier) => total + tier.capacity - tier.sold, 0)
+    });
+  }
+  return summaries;
 }
 
 export function bookTickets(store, request) {
@@ -138,7 +212,7 @@ export function bookTickets(store, request) {
     customerName,
     quantity: request.quantity,
     totalCents,
-    status: 'active'
+    status: 'pending'
   };
 
   tier.sold += request.quantity;

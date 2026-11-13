@@ -5,17 +5,24 @@ import {
   createEvent,
   createStore,
   findBookingByReference,
-  joinWaitlist
+  joinWaitlist,
+  publishEvent
 } from '../src/domain/inventory.js';
 import { DomainError } from '../src/domain/errors.js';
 
 const store = createStore();
-const event = createEvent(store, { name: 'Summer Sounds' });
+const event = createEvent(store, {
+  title: 'Summer Sounds',
+  city: 'Lagos',
+  venue: 'City Hall',
+  startsAt: '2026-12-05T17:00:00Z'
+});
 const tier = addTier(store, event.id, {
   name: 'General admission',
   capacity: 3,
   priceCents: 2500
 });
+publishEvent(store, event.id);
 
 const adaBooking = bookTickets(store, {
   eventId: event.id,
