@@ -86,3 +86,38 @@ folder is named `doccs/`, although its README and this build use `docs/`.
 **What I changed:**
 I kept the existing `doccs/` files in place, added the requested architecture
 document under `docs/`, and updated this existing AI log.
+
+
+
+
+
+## Build 4: Working REST API (in memory)
+
+### Entry 1: The Build 4 prompt
+
+**What I asked:**
+I gave my AI tool README.md, docs/user-stories.md, docs/build-4.md,
+docs/architecture.md and src/, then pasted the Build 4 prompt. It asked for
+an in-memory repository, event and booking services, a mock payment gateway,
+the API routes, docs/api-examples.md and API tests.
+
+**What came back:**
+All the requested files. npm test: ___ tests, all passing.
+
+**What I tested with curl:**
+I ran the calls in order in Git Bash: create event (draft), add tier
+(2500 cents, capacity 100), publish, search with filters and sorting, book 2
+tickets (pending, 5000 cents), and pay (paid). I booked 1 more ticket and
+cancelled it while unpaid. Errors always came back as
+{"error":{"code","message"}}, for example NOT_FOUND for an unknown event and
+VALIDATION when x-user-id was missing.
+
+**What was wrong:**
+POST /api/events first returned "Route not found". It was fixed by Ai agent, multiple servers were turned on
+
+**What I changed:**
+
+**What I learned:**
+The curl examples use placeholders (EVENT_ID, TIER_ID, BOOKING_REFERENCE)
+that must be replaced with real values from earlier responses. Data is held
+in memory, so restarting the server erases it.

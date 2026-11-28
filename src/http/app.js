@@ -2,6 +2,10 @@ import { createServer } from 'node:http';
 import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DomainError } from '../domain/errors.js';
+import { createMemoryRepository } from '../repositories/memory.js';
+import { createBookingService } from '../services/bookingService.js';
+import { createEventService } from '../services/eventService.js';
+import { charge } from '../lib/mockPaymentGateway.js';
 import { Router } from './router.js';
 
 const MAX_JSON_BYTES = 1_048_576;
@@ -36,10 +40,63 @@ function errorDetails(error) {
     return { status: error.status, code: error.code, message: error.message };
   }
   if (error instanceof DomainError) {
-    const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'INVALID_TRANSITION' ? 409 : 400;
+    const statusByCode = {
+      NOT_FOUND: 404,
+      FORBIDDEN: 403,
+      PAYMENT_DECLINED: 402,
+      INVALID_TRANSITION: 409,
+      INVALID_STATE: 409,
+      SOLD_OUT: 409
+    };
+    const status = statusByCode[error.code] ?? 400;
     return { status, code: error.code, message: error.message };
   }
   return { status: 500, code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' };
+}
+
+function jsonResponse(status, body) {
+  return { httpStatus: status, body };
+}
+
+function userIdFrom(request) {
+  const userId = request.headers['x-user-id'];
+  if (typeof userId !== 'string' || userId.trim() === '') {
+    throw new DomainError('VALIDATION', 'x-user-id header is required.');
+  }
+  return userId.trim();
+}
+
+function registerApiRoutes(router, repository, paymentGateway) {
+  const eventService = createEventService(repository);
+  const bookingService = createBookingService(repository, paymentGateway);
+
+  router.add('POST', '/api/events', async ({ request, body }) =>
+    jsonResponse(201, await eventService.createEvent(userIdFrom(request), body))
+  );
+  router.add('POST', '/api/events/:id/tiers', async ({ request, params, body }) =>
+    jsonResponse(201, await eventService.addTier(userIdFrom(request), params.id, body))
+  );
+  router.add('POST', '/api/events/:id/publish', async ({ request, params }) =>
+    jsonResponse(200, await eventService.publishEvent(userIdFrom(request), params.id))
+  );
+  router.add('GET', '/api/events', async ({ url }) => {
+    const criteria = Object.fromEntries(url.searchParams.entries());
+    const { sortBy = 'date', ...filters } = criteria;
+    return jsonResponse(200, { events: await eventService.search({ ...filters, sortBy }) });
+  });
+  router.add('POST', '/api/bookings', async ({ request, body }) =>
+    jsonResponse(201, await bookingService.createBooking(userIdFrom(request), body))
+  );
+  router.add('POST', '/api/bookings/:reference/pay', async ({ request, params, body }) => {
+    if (body !== undefined && (body === null || typeof body !== 'object' || Array.isArray(body))) {
+      throw new DomainError('VALIDATION', 'Payment request must be an object.');
+    }
+    const shouldDecline = body === undefined || body.decline === undefined ? false : body.decline;
+    return jsonResponse(200, await bookingService.pay(params.reference, userIdFrom(request), shouldDecline));
+  });
+  router.add('POST', '/api/bookings/:reference/cancel', async ({ request, params }) =>
+    jsonResponse(200, await bookingService.cancel(params.reference, userIdFrom(request)))
+  );
 }
 
 async function readJsonBody(request) {
@@ -111,7 +168,14 @@ async function serveStatic(request, response, pathname, publicDirectory) {
   }
 }
 
-export function createApp({ publicDir = path.resolve('public'), router = new Router() } = {}) {
+export function createApp({
+  publicDir = path.resolve('public'),
+  router = new Router(),
+  repository = createMemoryRepository(),
+  paymentGateway = { charge }
+} = {}) {
+  registerApiRoutes(router, repository, paymentGateway);
+
   if (!router.match('GET', '/health')) {
     router.add('GET', '/health', () => ({ status: 'ok' }));
   }
@@ -122,7 +186,12 @@ export function createApp({ publicDir = path.resolve('public'), router = new Rou
       const body = await readJsonBody(request);
       const route = router.match(request.method, url.pathname);
       if (route) {
-        sendJson(response, 200, await route.handler({ request, params: route.params, body }));
+        const result = await route.handler({ request, params: route.params, body, url });
+        if (result !== null && typeof result === 'object' && Number.isInteger(result.httpStatus) && 'body' in result) {
+          sendJson(response, result.httpStatus, result.body);
+        } else {
+          sendJson(response, 200, result);
+        }
         return;
       }
       if (url.pathname === '/health' || url.pathname === '/api' || url.pathname.startsWith('/api/')) {
